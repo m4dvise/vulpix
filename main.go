@@ -1,9 +1,10 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"log"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -82,12 +83,12 @@ func main() {
 	for range ticker.C {
 		now := time.Now()
 
-		// 1. Evict stale devices 
 		mu.Lock()
 
-                // 2. take a snapshot.
+		// 1. Take a snapshot.
 		snapshot := make([]device, 0, len(devices))
 
+		// 2. Evict stale devices
 		for address, dev := range devices {
 			if now.Sub(dev.LastSeen) > deviceTimeout {
 				delete(devices, address)
@@ -99,9 +100,12 @@ func main() {
 		mu.Unlock()
 
 		// 3. Sort and render outside the lock.
-		sort.Slice(snapshot, func(i, j int) bool {
-		        return snapshot[i].RSSI > snapshot[j].RSSI
-		})
+                slices.SortFunc(snapshot, func(a, b device) int {
+                        if c := cmp.Compare(b.RSSI, a.RSSI); c != 0 {
+                                return c
+                        }
+                        return cmp.Compare(a.Name, b.Name)
+                })
 
 		render(snapshot)
 	}
