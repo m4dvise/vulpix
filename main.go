@@ -2,8 +2,10 @@ package main
 
 import (
 	"cmp"
+	"flag"
 	"fmt"
 	"log"
+	"os"
 	"slices"
 	"sync"
 	"time"
@@ -16,9 +18,19 @@ const (
 	deviceTimeout  = 10 * time.Second
 
 	// Column widths, shared by the header and the rows so they cannot drift.
-	addrWidth = 38 // macOS reports a 36-character UUID here
-	nameWidth = 24
-	rssiWidth = 8
+	addrWidth      = 38 // macOS reports a 36-character UUID here
+	nameWidth      = 24
+	rssiWidth      = 8
+	proximityWidth = 16
+
+	// Proximity reference points.
+	defaultNear = -50
+	defaultFar  = -72
+)
+
+const (
+	modeRaw       = "raw"
+	modeCalibrate = "calibrate"
 )
 
 type device struct {
@@ -29,6 +41,17 @@ type device struct {
 }
 
 func main() {
+	mode := flag.String("mode", modeCalibrate, "raw for RSSI only, calibrate for RSSI plus proximity band")
+	near := flag.Int("near", defaultNear, "RSSI at or above which a device reads very close")
+	far := flag.Int("far", defaultFar, "RSSI below which a device reads far")
+	flag.Parse()
+
+	if err := validateMode(*mode); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		flag.Usage()
+		os.Exit(2)
+	}
+
 	adapter := bluetooth.DefaultAdapter
 
 	if err := adapter.Enable(); err != nil {
@@ -59,8 +82,8 @@ func main() {
 			mu.Lock()
 			defer mu.Unlock()
 
-			// Preserve the previous name if this advertisement
-			// doesn't include one.
+			// Preserve the previous name if this advertisement doesn't
+			// include one.
 			dev := devices[address]
 			dev.Address = address
 			if name := d.LocalName(); name != "" {
@@ -100,29 +123,49 @@ func main() {
 		mu.Unlock()
 
 		// 3. Sort and render outside the lock.
-                slices.SortFunc(snapshot, func(a, b device) int {
-                        if c := cmp.Compare(b.RSSI, a.RSSI); c != 0 {
-                                return c
-                        }
-                        return cmp.Compare(a.Name, b.Name)
-                })
+		slices.SortFunc(snapshot, func(a, b device) int {
+			if c := cmp.Compare(b.RSSI, a.RSSI); c != 0 {
+				return c
+			}
+			return cmp.Compare(a.Name, b.Name)
+		})
 
-		render(snapshot)
+		render(snapshot, *near, *far, *mode)
 	}
 }
 
-func render(devices []device) {
+func validateMode(mode string) error {
+	switch mode {
+	case modeRaw, modeCalibrate:
+		return nil
+	}
+	return fmt.Errorf("unknown mode %q: want %q or %q", mode, modeRaw, modeCalibrate)
+}
+
+func render(devices []device, near, far int, mode string) {
 	// Cursor home, then clear to end of screen: the frame repaints in place
 	// instead of scrolling the terminal.
 	fmt.Print("\033[H\033[J")
 
 	fmt.Printf("--- BLE devices (%d) ---\n", len(devices))
-	fmt.Printf("%-*s %-*s %*s  %s\n",
-		addrWidth, "ADDRESS",
-		nameWidth, "NAME",
-		rssiWidth, "RSSI",
-		"LAST SEEN",
-	)
+
+	showBand := mode == modeCalibrate
+
+	if showBand {
+		fmt.Printf("%-*s %-*s %-*s %s\n",
+			addrWidth, "ADDRESS",
+			nameWidth, "NAME",
+			proximityWidth, "PROXIMITY",
+			"LAST SEEN",
+		)
+	} else {
+		fmt.Printf("%-*s %-*s %*s  %s\n",
+			addrWidth, "ADDRESS",
+			nameWidth, "NAME",
+			rssiWidth, "RSSI",
+			"LAST SEEN",
+		)
+	}
 
 	for _, dev := range devices {
 		name := dev.Name
@@ -130,11 +173,32 @@ func render(devices []device) {
 			name = "(unknown)"
 		}
 
-		fmt.Printf("%-*s %-*s %*s  %v ago\n",
-			addrWidth, dev.Address,
-			nameWidth, name,
-			rssiWidth, fmt.Sprintf("%d dBm", dev.RSSI),
-			time.Since(dev.LastSeen).Round(time.Millisecond),
-		)
+		rssi := fmt.Sprintf("%d dBm", dev.RSSI)
+		lastSeen := fmt.Sprintf("%v ago", time.Since(dev.LastSeen).Round(time.Millisecond))
+
+		if showBand {
+			fmt.Printf("%-*s %-*s %-*s %s\n",
+				addrWidth, dev.Address,
+				nameWidth, name,
+				proximityWidth, proximity(dev.RSSI, int16(near), int16(far)),
+				lastSeen,
+			)
+		} else {
+			fmt.Printf("%-*s %-*s %*s  %s\n",
+				addrWidth, dev.Address,
+				nameWidth, name,
+				rssiWidth, rssi,
+				lastSeen,
+			)
+		}
 	}
+}
+
+func proximity(rssi, near, far int16) string {
+	if rssi >= near {
+		return "very close"
+	} else if rssi >= far {
+		return "same room"
+	}
+	return "far"
 }
